@@ -1,0 +1,31 @@
+name: Validate vmnet subnet
+
+on:
+  push:
+    branches:
+      - ci/vmnet-subnet-v2
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify Swift toolchain and development entitlement
+        run: |
+          swift --version
+          swift -e '#if compiler(>=6.4)
+          print("Swift 6.4+")
+          #else
+          fatalError("Swift 6.4 or newer is required")
+          #endif'
+          plutil -lint Resources/tart-dev.entitlements
+          test "$(plutil -extract com.apple.vm.networking raw Resources/tart-dev.entitlements)" = true
+      - name: Build
+        run: swift build --build-system swiftbuild
+      - name: Run vmnet unit tests
+        run: swift test --build-system swiftbuild --filter NetworkVmnetTests
