@@ -24,7 +24,7 @@ jobs:
           fatalError("Swift 6.4 or newer is required")
           #endif'
           plutil -lint Resources/tart-dev.entitlements
-          test "$(plutil -extract com.apple.vm.networking raw Resources/tart-dev.entitlements)" = true
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.vm.networking' Resources/tart-dev.entitlements)" = true
       - name: Build
         run: swift build --build-system swiftbuild
       - name: Run vmnet unit tests
