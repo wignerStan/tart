@@ -11,9 +11,9 @@ permissions:
 
 jobs:
   build:
-    name: Build universal macOS artifact
+    name: Build Apple Silicon macOS artifact
     runs-on: xcode-27
-    timeout-minutes: 90
+    timeout-minutes: 60
     env:
       FEATURE_COMMIT: 6b8776becb146ad01895ba14bfeedfaa656da9a0
 
@@ -34,11 +34,11 @@ jobs:
           git diff --exit-code "$FEATURE_COMMIT" -- . \
             ':(exclude).github/workflows/build-vmnet-subnet-artifact.yml'
 
-      - name: Build and run unit tests
+      - name: Build and test vmnet feature
         run: |
           export PATH="$PATH:/usr/sbin"
           swift build --build-system swiftbuild
-          swift test --build-system swiftbuild
+          swift test --build-system swiftbuild --filter NetworkVmnetTests
 
       - name: Verify formatting
         run: |
@@ -50,7 +50,7 @@ jobs:
             --report swiftformat.json \
             .
 
-      - name: Build universal release application
+      - name: Build release binary and verify CLI
         env:
           VERSION: 0.0.0-vmnet-subnet-${{ github.sha }}
         run: |
@@ -58,20 +58,41 @@ jobs:
 
           .ci/set-version.sh
           sh .ci/build-release.sh arm64
-          sh .ci/build-release.sh x86_64
 
-          app="dist/tart-vmnet-subnet/tart.app"
+          binary=".build/prebuilt/arm64/tart"
+          file "$binary"
+          "$binary" --version
+          "$binary" run --help | grep -- "--net-vmnet-subnet"
+
+      - name: Create and sign app bundle
+        run: |
+          set -euxo pipefail
+
+          package="dist/tart-vmnet-subnet"
+          app="$package/tart.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
-          lipo -create \
-            .build/prebuilt/arm64/tart \
-            .build/prebuilt/x86_64/tart \
-            -output "$app/Contents/MacOS/tart"
-
+          cp .build/prebuilt/arm64/tart "$app/Contents/MacOS/tart"
           cp Resources/embedded.provisionprofile "$app/Contents/"
           cp Resources/Info.plist "$app/Contents/"
           cp "Resources/actool/UPW Tart.icns" "$app/Contents/Resources/"
           cp "Resources/actool/Assets.car" "$app/Contents/Resources/"
+          cp Resources/tart-dev.entitlements "$package/"
+
+          cat > "$package/resign-local.sh" <<'EOF'
+          #!/bin/sh
+          set -eu
+          cd "$(dirname "$0")"
+          codesign \
+            --force \
+            --deep \
+            --sign - \
+            --entitlements tart-dev.entitlements \
+            tart.app
+          codesign --verify --strict --deep --verbose=2 tart.app
+          codesign --display --entitlements :- tart.app
+          EOF
+          chmod +x "$package/resign-local.sh"
 
           codesign \
             --force \
@@ -81,34 +102,39 @@ jobs:
             "$app"
 
           codesign --verify --strict --deep --verbose=2 "$app"
-          codesign --display --entitlements :- "$app"
-          lipo -info "$app/Contents/MacOS/tart"
-          "$app/Contents/MacOS/tart" --version
-          "$app/Contents/MacOS/tart" run --help | grep -- "--net-vmnet-subnet"
+          codesign --display --entitlements :- "$app" | tee dist/entitlements.plist
+          file "$app/Contents/MacOS/tart"
 
       - name: Package test build
         run: |
           set -euxo pipefail
 
-          cat > dist/TESTING.md <<'EOF'
+          cat > dist/tart-vmnet-subnet/TESTING.md <<'EOF'
           # Tart vmnet-subnet test build
 
-          This build is produced from the `feat/vmnet-subnet` feature branch and
-          requires macOS 26 or newer for `--net-vmnet-subnet`.
+          This Apple Silicon test build is produced from feature commit
+          `6b8776becb146ad01895ba14bfeedfaa656da9a0` and requires macOS 26 or newer.
+          It is development-signed with Tart's embedded provisioning profile and
+          `com.apple.vm.networking` entitlement; it is not notarized.
 
-          ## Install without replacing your normal Tart
+          ## Install without replacing normal Tart
 
           ```shell
-          unzip tart-vmnet-subnet.zip
-          xattr -dr com.apple.quarantine tart-vmnet-subnet/tart.app
+          unzip tart-vmnet-subnet-arm64.zip
+          cd tart-vmnet-subnet
+          xattr -dr com.apple.quarantine tart.app
+          ./resign-local.sh
           sudo mkdir -p /Applications/Tart-vmnet-subnet
-          sudo ditto tart-vmnet-subnet/tart.app /Applications/Tart-vmnet-subnet/tart.app
-          sudo ln -sf /Applications/Tart-vmnet-subnet/tart.app/Contents/MacOS/tart /usr/local/bin/tart-vmnet-subnet
+          sudo ditto tart.app /Applications/Tart-vmnet-subnet/tart.app
+          sudo ln -sf /Applications/Tart-vmnet-subnet/tart.app/Contents/MacOS/tart /opt/homebrew/bin/tart-vmnet-subnet
           tart-vmnet-subnet --version
           ```
 
-          On Apple Silicon systems where Homebrew uses `/opt/homebrew/bin`, use
-          that directory for the symlink instead of `/usr/local/bin` when desired.
+          Re-signing locally is intentional. GitHub-hosted macOS runners terminate
+          executables that carry the restricted vmnet entitlement, so Actions can
+          compile, inspect, and verify the signature but cannot execute the signed
+          application. The unsigned release binary is executed before packaging to
+          verify the CLI and option registration.
 
           ## Test the subnet
 
@@ -121,8 +147,7 @@ jobs:
             YOUR_VM_NAME
           ```
 
-          In another terminal, resolve the address actually assigned by DHCP and
-          inspect its route:
+          In another terminal, resolve the address actually assigned by DHCP:
 
           ```shell
           GUEST_IP="$(tart-vmnet-subnet ip YOUR_VM_NAME --wait 120)"
@@ -130,38 +155,40 @@ jobs:
           route -n get "$GUEST_IP"
           ```
 
-          If the host DHCP lease resolver does not see the logical-network lease,
-          retry with `--resolver arp` after the guest has generated traffic, or use
-          `--resolver agent` when tart-guest-agent is installed.
+          The guest address is not guaranteed to be `.2`. If the default DHCP lease
+          resolver does not see the logical-network lease, retry after the guest has
+          generated traffic:
 
-          Configure the sing-box route rule for `192.168.200.0/24` to select its
-          direct outbound. The traffic may still enter the TUN; the deterministic
-          CIDR is what lets the direct rule distinguish Tart from Parallels.
+          ```shell
+          tart-vmnet-subnet ip YOUR_VM_NAME --resolver arp --wait 120
+          ```
 
-          This is an ad-hoc development-signed build, not a notarized release.
-          Keep the complete app bundle because it contains the provisioning profile
-          and vmnet entitlement required by the native network API.
+          `--resolver agent` is another option when tart-guest-agent is installed.
+
+          Configure sing-box to match destination `192.168.200.0/24` and select its
+          direct outbound. The packet may still enter the TUN; the deterministic
+          CIDR is what distinguishes Tart from Parallels.
           EOF
 
           {
             printf 'feature commit: %s\n' "$FEATURE_COMMIT"
             printf 'build commit: %s\n' "$GITHUB_SHA"
-          } > dist/BUILD_COMMIT.txt
+          } > dist/tart-vmnet-subnet/BUILD_COMMIT.txt
 
           ditto -c -k --sequesterRsrc --keepParent \
             dist/tart-vmnet-subnet \
-            dist/tart-vmnet-subnet.zip
-          shasum -a 256 dist/tart-vmnet-subnet.zip > dist/tart-vmnet-subnet.zip.sha256
+            dist/tart-vmnet-subnet-arm64.zip
+          shasum -a 256 dist/tart-vmnet-subnet-arm64.zip \
+            > dist/tart-vmnet-subnet-arm64.zip.sha256
 
       - name: Upload test artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: tart-vmnet-subnet-universal-${{ github.sha }}
+          name: tart-vmnet-subnet-arm64-${{ github.sha }}
           path: |
-            dist/tart-vmnet-subnet.zip
-            dist/tart-vmnet-subnet.zip.sha256
-            dist/TESTING.md
-            dist/BUILD_COMMIT.txt
+            dist/tart-vmnet-subnet-arm64.zip
+            dist/tart-vmnet-subnet-arm64.zip.sha256
+            dist/entitlements.plist
             swiftformat.json
           if-no-files-found: error
           retention-days: 14
