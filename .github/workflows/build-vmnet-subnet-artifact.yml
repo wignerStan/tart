@@ -1,0 +1,150 @@
+name: Build vmnet subnet test artifact
+
+on:
+  push:
+    branches:
+      - build/vmnet-subnet-macos
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build universal macOS artifact
+    runs-on: xcode-27
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          swift --version
+          xcodebuild -version
+
+      - name: Build and run unit tests
+        run: |
+          export PATH="$PATH:/usr/sbin"
+          swift build --build-system swiftbuild
+          swift test --build-system swiftbuild
+
+      - name: Verify formatting
+        run: |
+          swift package plugin \
+            --allow-writing-to-package-directory \
+            swiftformat \
+            --cache ignore \
+            --lint \
+            --report swiftformat.json \
+            .
+
+      - name: Build universal release application
+        env:
+          VERSION: 0.0.0-vmnet-subnet-${{ github.sha }}
+        run: |
+          set -euxo pipefail
+
+          .ci/set-version.sh
+          sh .ci/build-release.sh arm64
+          sh .ci/build-release.sh x86_64
+
+          app="dist/tart-vmnet-subnet/tart.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+
+          lipo -create \
+            .build/prebuilt/arm64/tart \
+            .build/prebuilt/x86_64/tart \
+            -output "$app/Contents/MacOS/tart"
+
+          cp Resources/embedded.provisionprofile "$app/Contents/"
+          cp Resources/Info.plist "$app/Contents/"
+          cp "Resources/actool/UPW Tart.icns" "$app/Contents/Resources/"
+          cp "Resources/actool/Assets.car" "$app/Contents/Resources/"
+
+          codesign \
+            --force \
+            --deep \
+            --sign - \
+            --entitlements Resources/tart-dev.entitlements \
+            "$app"
+
+          codesign --verify --strict --deep --verbose=2 "$app"
+          codesign --display --entitlements :- "$app"
+          lipo -info "$app/Contents/MacOS/tart"
+          "$app/Contents/MacOS/tart" --version
+          "$app/Contents/MacOS/tart" run --help | grep -- "--net-vmnet-subnet"
+
+      - name: Package test build
+        run: |
+          set -euxo pipefail
+
+          cat > dist/TESTING.md <<'EOF'
+          # Tart vmnet-subnet test build
+
+          This build is produced from the `feat/vmnet-subnet` feature branch and
+          requires macOS 26 or newer for `--net-vmnet-subnet`.
+
+          ## Install without replacing your normal Tart
+
+          ```shell
+          unzip tart-vmnet-subnet.zip
+          xattr -dr com.apple.quarantine tart-vmnet-subnet/tart.app
+          sudo mkdir -p /Applications/Tart-vmnet-subnet
+          sudo ditto tart-vmnet-subnet/tart.app /Applications/Tart-vmnet-subnet/tart.app
+          sudo ln -sf /Applications/Tart-vmnet-subnet/tart.app/Contents/MacOS/tart /usr/local/bin/tart-vmnet-subnet
+          tart-vmnet-subnet --version
+          ```
+
+          On Apple Silicon systems where Homebrew uses `/opt/homebrew/bin`, use
+          that directory for the symlink instead of `/usr/local/bin` when desired.
+
+          ## Test the subnet
+
+          Choose a private CIDR that does not overlap your LAN, VPN, sing-box TUN,
+          Parallels networks, or another active vmnet network:
+
+          ```shell
+          tart-vmnet-subnet run \
+            --net-vmnet-subnet 192.168.200.0/24 \
+            YOUR_VM_NAME
+          ```
+
+          In another terminal:
+
+          ```shell
+          tart-vmnet-subnet ip YOUR_VM_NAME --wait 120
+          route -n get 192.168.200.2
+          ```
+
+          Configure the sing-box route rule for `192.168.200.0/24` to select its
+          direct outbound. The traffic may still enter the TUN; the deterministic
+          CIDR is what lets the direct rule distinguish Tart from Parallels.
+
+          This is an ad-hoc development-signed build, not a notarized release.
+          Keep the complete app bundle because it contains the provisioning profile
+          and vmnet entitlement required by the native network API.
+          EOF
+
+          printf '%s\n' "${GITHUB_SHA}" > dist/BUILD_COMMIT.txt
+          ditto -c -k --sequesterRsrc --keepParent \
+            dist/tart-vmnet-subnet \
+            dist/tart-vmnet-subnet.zip
+          shasum -a 256 dist/tart-vmnet-subnet.zip > dist/tart-vmnet-subnet.zip.sha256
+
+      - name: Upload test artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tart-vmnet-subnet-universal-${{ github.sha }}
+          path: |
+            dist/tart-vmnet-subnet.zip
+            dist/tart-vmnet-subnet.zip.sha256
+            dist/TESTING.md
+            dist/BUILD_COMMIT.txt
+            swiftformat.json
+          if-no-files-found: error
+          retention-days: 14
