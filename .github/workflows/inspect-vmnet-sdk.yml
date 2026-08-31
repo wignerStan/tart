@@ -38,13 +38,17 @@ jobs:
           grep -n -B 8 -A 12 'vmnet_network_ref' "$VMNET" | head -120
           cat "$VZ"
 
-      - name: Type-check explicit release pattern
+      - name: Type-check opaque-pointer release pattern
         shell: bash
         run: |
           set -euxo pipefail
           cat > "$RUNNER_TEMP/ownership.swift" <<'SWIFT'
-          import CoreFoundation
           import vmnet
+
+          private enum TestError: Error {
+            case configuration(vmnet_return_t)
+            case network(vmnet_return_t)
+          }
 
           @available(macOS 26, *)
           final class Owner {
@@ -53,19 +57,33 @@ jobs:
             init() throws {
               var status: vmnet_return_t = .VMNET_FAILURE
               guard let configuration = vmnet_network_configuration_create(.VMNET_SHARED_MODE, &status) else {
-                throw NSError(domain: "test", code: 1)
+                throw TestError.configuration(status)
               }
-              defer { CFRelease(configuration) }
+              defer { Self.release(configuration) }
+
+              guard status == .VMNET_SUCCESS else {
+                throw TestError.configuration(status)
+              }
 
               status = .VMNET_FAILURE
               guard let network = vmnet_network_create(configuration, &status) else {
-                throw NSError(domain: "test", code: 2)
+                throw TestError.network(status)
               }
+
+              guard status == .VMNET_SUCCESS else {
+                Self.release(network)
+                throw TestError.network(status)
+              }
+
               self.network = network
             }
 
             deinit {
-              CFRelease(network)
+              Self.release(network)
+            }
+
+            private static func release(_ pointer: OpaquePointer) {
+              Unmanaged<AnyObject>.fromOpaque(UnsafeRawPointer(pointer)).release()
             }
           }
           SWIFT
