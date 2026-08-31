@@ -90,38 +90,37 @@ jobs:
 
           xcrun swiftc -typecheck "$RUNNER_TEMP/ownership.swift"
 
-      - name: Inspect release helper code generation
+      - name: Compare release helper code generation
         shell: bash
         run: |
           set -euxo pipefail
-          cat > "$RUNNER_TEMP/release-codegen.swift" <<'SWIFT'
-          import CoreFoundation
 
-          @_silgen_name("CFRelease")
-          private func rawCFRelease(_ object: UnsafeRawPointer)
-
+          cat > "$RUNNER_TEMP/unmanaged.swift" <<'SWIFT'
           @inline(never)
           public func releaseWithUnmanaged(_ pointer: OpaquePointer) {
             Unmanaged<AnyObject>.fromOpaque(UnsafeRawPointer(pointer)).release()
           }
+          SWIFT
+
+          cat > "$RUNNER_TEMP/raw-cf.swift" <<'SWIFT'
+          @_silgen_name("CFRelease")
+          private func rawCFRelease(_ object: UnsafeRawPointer)
 
           @inline(never)
-          public func releaseWithCFBitCast(_ pointer: OpaquePointer) {
-            CFRelease(unsafeBitCast(pointer, to: CFTypeRef.self))
-          }
-
-          @inline(never)
-          public func releaseWithRawCFunction(_ pointer: OpaquePointer) {
+          public func releaseWithRawCFRelease(_ pointer: OpaquePointer) {
             rawCFRelease(UnsafeRawPointer(pointer))
           }
           SWIFT
 
-          xcrun swiftc \
-            -parse-as-library \
-            -O \
-            -emit-object \
-            "$RUNNER_TEMP/release-codegen.swift" \
-            -o "$RUNNER_TEMP/release-codegen.o"
-
-          nm -u "$RUNNER_TEMP/release-codegen.o"
-          otool -tvV "$RUNNER_TEMP/release-codegen.o"
+          for source in unmanaged raw-cf; do
+            xcrun swiftc \
+              -parse-as-library \
+              -O \
+              -emit-object \
+              "$RUNNER_TEMP/$source.swift" \
+              -o "$RUNNER_TEMP/$source.o"
+            echo "=== undefined symbols: $source ==="
+            nm -u "$RUNNER_TEMP/$source.o"
+            echo "=== disassembly: $source ==="
+            otool -tvV "$RUNNER_TEMP/$source.o"
+          done
