@@ -1,0 +1,184 @@
+name: Validate vmnet subnet corrected head v4
+
+on:
+  push:
+    branches:
+      - ci/vmnet-subnet-v4
+
+permissions:
+  contents: read
+
+env:
+  FEATURE_COMMIT: 43978042b895d0dd8dcb1a2243c9c2187cb1af36
+
+jobs:
+  validate:
+    name: Build, test, sign, and package
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact feature source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sw_vers
+          xcodebuild -version
+          swift --version
+          git merge-base --is-ancestor "$FEATURE_COMMIT" HEAD
+          git diff --exit-code "$FEATURE_COMMIT" -- . \
+            ':(exclude).github/workflows/validate-vmnet-subnet-v4.yml'
+
+      - name: Verify SDK contract and provisioning profile
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SDK="$(xcrun --sdk macosx --show-sdk-path)"
+          HEADER="$SDK/System/Library/Frameworks/vmnet.framework/Headers/vmnet.h"
+          grep -n -B 5 -A 24 'vmnet_network_configuration_set_ipv4_subnet' "$HEADER"
+          grep -q 'The subnet address' "$HEADER"
+
+          plutil -lint Resources/tart-vmnet-dev.entitlements
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.vm.networking' Resources/tart-vmnet-dev.entitlements)" = true
+
+          security cms -D -i Resources/embedded.provisionprofile > "$RUNNER_TEMP/profile.plist"
+          plutil -lint "$RUNNER_TEMP/profile.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.vm.networking' "$RUNNER_TEMP/profile.plist")" = true
+
+      - name: Probe setter with canonical subnet address
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat > "$RUNNER_TEMP/vmnet-setter-probe.c" <<'C'
+          #include <arpa/inet.h>
+          #include <CoreFoundation/CoreFoundation.h>
+          #include <stdio.h>
+          #include <vmnet/vmnet.h>
+
+          int main(void) {
+            vmnet_return_t status = VMNET_FAILURE;
+            vmnet_network_configuration_ref config =
+                vmnet_network_configuration_create(VMNET_SHARED_MODE, &status);
+            if (config == NULL || status != VMNET_SUCCESS) return 1;
+
+            struct in_addr subnet = {0};
+            struct in_addr mask = {0};
+            if (inet_pton(AF_INET, "192.168.247.0", &subnet) != 1 ||
+                inet_pton(AF_INET, "255.255.255.0", &mask) != 1) return 2;
+
+            status = vmnet_network_configuration_set_ipv4_subnet(config, &subnet, &mask);
+            CFRelease(config);
+            if (status != VMNET_SUCCESS) {
+              fprintf(stderr, "setter failed: %d\n", status);
+              return 3;
+            }
+            puts("canonical subnet address accepted");
+            return 0;
+          }
+          C
+          xcrun clang "$RUNNER_TEMP/vmnet-setter-probe.c" \
+            -framework CoreFoundation -framework vmnet \
+            -o "$RUNNER_TEMP/vmnet-setter-probe"
+          "$RUNNER_TEMP/vmnet-setter-probe"
+
+      - name: Build and run all unit tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export PATH="$PATH:/usr/sbin"
+          swift build --build-system swiftbuild
+          swift test --build-system swiftbuild
+          swift test --build-system swiftbuild --filter NetworkVmnetTests
+
+      - name: Check SwiftFormat
+        shell: bash
+        run: |
+          set -euxo pipefail
+          swift package plugin \
+            --allow-writing-to-package-directory \
+            swiftformat \
+            --cache ignore \
+            --lint \
+            .
+
+      - name: Build and sign Apple Silicon test bundle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          .ci/set-version.sh
+          sh .ci/build-release.sh arm64
+          BINARY=.build/prebuilt/arm64/tart
+          file "$BINARY"
+          "$BINARY" --version
+          "$BINARY" run --help | grep -q -- '--net-vmnet-subnet'
+
+          ROOT="$RUNNER_TEMP/tart-vmnet-subnet"
+          APP="$ROOT/tart.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp "$BINARY" "$APP/Contents/MacOS/tart"
+          cp Resources/Info.plist Resources/embedded.provisionprofile "$APP/Contents/"
+          cp "Resources/actool/UPW Tart.icns" Resources/actool/Assets.car "$APP/Contents/Resources/"
+          cp Resources/tart-vmnet-dev.entitlements "$ROOT/"
+
+          codesign --force --deep --sign - \
+            --entitlements Resources/tart-vmnet-dev.entitlements \
+            "$APP"
+          codesign --verify --strict --deep --verbose=2 "$APP"
+          codesign --display --entitlements :- "$APP" > "$RUNNER_TEMP/signed-entitlements.plist"
+          plutil -lint "$RUNNER_TEMP/signed-entitlements.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.vm.networking' "$RUNNER_TEMP/signed-entitlements.plist")" = true
+
+          cat > "$ROOT/resign-local.sh" <<'EOF'
+          #!/bin/sh
+          set -eu
+          cd "$(dirname "$0")"
+          codesign --force --deep --sign - \
+            --entitlements tart-vmnet-dev.entitlements \
+            tart.app
+          codesign --verify --strict --deep --verbose=2 tart.app
+          codesign --display --entitlements :- tart.app
+          EOF
+          chmod +x "$ROOT/resign-local.sh"
+
+          cat > "$ROOT/TESTING.md" <<'EOF'
+          # Tart vmnet-subnet real-machine test
+
+          Requirements: Apple Silicon, macOS 26 or newer, and an existing Tart VM.
+
+          ```sh
+          xattr -dr com.apple.quarantine .
+          ./resign-local.sh
+          TART="$PWD/tart.app/Contents/MacOS/tart"
+          "$TART" run --net-vmnet-subnet 192.168.200.0/24 YOUR_VM
+          ```
+
+          In a second terminal:
+
+          ```sh
+          TART="$PWD/tart.app/Contents/MacOS/tart"
+          IP="$($TART ip YOUR_VM --wait 120)"
+          printf 'guest IP: %s\n' "$IP"
+          route -n get "$IP"
+          ping -c 3 "$IP"
+          ```
+
+          Verify guest DHCP, gateway, DNS, Internet access, the sing-box direct rule for 192.168.200.0/24, and that the Parallels CIDR remains unaffected.
+          EOF
+
+          printf '%s\n' "$FEATURE_COMMIT" > "$ROOT/FEATURE_COMMIT.txt"
+          git rev-parse HEAD > "$ROOT/BUILD_COMMIT.txt"
+          cd "$RUNNER_TEMP"
+          ditto -c -k --sequesterRsrc --keepParent tart-vmnet-subnet tart-vmnet-subnet-arm64.zip
+          shasum -a 256 tart-vmnet-subnet-arm64.zip > tart-vmnet-subnet-arm64.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tart-vmnet-subnet-arm64-43978042
+          path: |
+            ${{ runner.temp }}/tart-vmnet-subnet-arm64.zip
+            ${{ runner.temp }}/tart-vmnet-subnet-arm64.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
