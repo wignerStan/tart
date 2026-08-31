@@ -108,9 +108,9 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          .ci/set-version.sh
-          sh .ci/build-release.sh arm64
-          BINARY=.build/prebuilt/arm64/tart
+          swift build -c release --product tart --build-system swiftbuild
+          BIN_DIR="$(swift build -c release --build-system swiftbuild --show-bin-path)"
+          BINARY="$BIN_DIR/tart"
           file "$BINARY"
           "$BINARY" --version
           "$BINARY" run --help | grep -q -- '--net-vmnet-subnet'
@@ -127,7 +127,7 @@ jobs:
             --entitlements Resources/tart-vmnet-dev.entitlements \
             "$APP"
           codesign --verify --strict --deep --verbose=2 "$APP"
-          codesign --display --entitlements :- "$APP" > "$RUNNER_TEMP/signed-entitlements.plist"
+          codesign -d --entitlements :- "$APP" > "$RUNNER_TEMP/signed-entitlements.plist"
           plutil -lint "$RUNNER_TEMP/signed-entitlements.plist"
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.vm.networking' "$RUNNER_TEMP/signed-entitlements.plist")" = true
 
@@ -139,7 +139,7 @@ jobs:
             --entitlements tart-vmnet-dev.entitlements \
             tart.app
           codesign --verify --strict --deep --verbose=2 tart.app
-          codesign --display --entitlements :- tart.app
+          codesign -d --entitlements :- tart.app
           EOF
           chmod +x "$ROOT/resign-local.sh"
 
@@ -165,7 +165,7 @@ jobs:
           ping -c 3 "$IP"
           ```
 
-          Verify guest DHCP, gateway, DNS, Internet access, the sing-box direct rule for 192.168.200.0/24, and that the Parallels CIDR remains unaffected.
+          Verify guest DHCP, gateway, DNS, Internet access, the sing-box direct rule for 192.168.200.0/24, and that the Parallels CIDR remains unaffected. Also inspect IPv6 addresses and routes so any default vmnet IPv6 behavior is recorded.
           EOF
 
           printf '%s\n' "$FEATURE_COMMIT" > "$ROOT/FEATURE_COMMIT.txt"
