@@ -1,0 +1,73 @@
+name: Inspect vmnet SDK ownership
+
+on:
+  push:
+    branches:
+      - review/vmnet-sdk-ownership
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: xcode-27
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Inspect SDK declarations
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SDK="$(xcrun --sdk macosx --show-sdk-path)"
+          VMNET="$SDK/System/Library/Frameworks/vmnet.framework/Headers/vmnet.h"
+          VZ="$SDK/System/Library/Frameworks/Virtualization.framework/Headers/VZVmnetNetworkDeviceAttachment.h"
+
+          sw_vers
+          swift --version
+          xcodebuild -version
+          test -f "$VMNET"
+          test -f "$VZ"
+
+          grep -n -B 12 -A 20 'vmnet_network_configuration_create' "$VMNET"
+          grep -n -B 12 -A 20 'vmnet_network_create' "$VMNET"
+          grep -n -B 8 -A 12 'vmnet_network_configuration_ref' "$VMNET" | head -80
+          grep -n -B 8 -A 12 'vmnet_network_ref' "$VMNET" | head -120
+          cat "$VZ"
+
+      - name: Type-check explicit release pattern
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat > "$RUNNER_TEMP/ownership.swift" <<'SWIFT'
+          import CoreFoundation
+          import vmnet
+
+          @available(macOS 26, *)
+          final class Owner {
+            private let network: vmnet_network_ref
+
+            init() throws {
+              var status: vmnet_return_t = .VMNET_FAILURE
+              guard let configuration = vmnet_network_configuration_create(.VMNET_SHARED_MODE, &status) else {
+                throw NSError(domain: "test", code: 1)
+              }
+              defer { CFRelease(configuration) }
+
+              status = .VMNET_FAILURE
+              guard let network = vmnet_network_create(configuration, &status) else {
+                throw NSError(domain: "test", code: 2)
+              }
+              self.network = network
+            }
+
+            deinit {
+              CFRelease(network)
+            }
+          }
+          SWIFT
+
+          xcrun swiftc -typecheck "$RUNNER_TEMP/ownership.swift"
