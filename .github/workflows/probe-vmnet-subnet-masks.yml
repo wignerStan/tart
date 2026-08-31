@@ -1,0 +1,71 @@
+name: Probe vmnet IPv4 subnet masks
+
+on:
+  push:
+    branches:
+      - probe/vmnet-subnet-masks
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: xcode-27
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Probe every advertised private-range boundary and /30
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat > "$RUNNER_TEMP/probe.c" <<'C'
+          #include <arpa/inet.h>
+          #include <CoreFoundation/CoreFoundation.h>
+          #include <stdio.h>
+          #include <vmnet/vmnet.h>
+
+          struct test_case {
+            const char *address;
+            const char *mask;
+          };
+
+          int main(void) {
+            const struct test_case cases[] = {
+              {"10.0.0.0", "255.0.0.0"},
+              {"172.16.0.0", "255.240.0.0"},
+              {"192.168.0.0", "255.255.0.0"},
+              {"192.168.200.0", "255.255.255.0"},
+              {"192.168.200.0", "255.255.255.252"},
+            };
+
+            for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+              vmnet_return_t status = VMNET_FAILURE;
+              vmnet_network_configuration_ref config =
+                vmnet_network_configuration_create(VMNET_SHARED_MODE, &status);
+              if (config == NULL || status != VMNET_SUCCESS) {
+                fprintf(stderr, "configuration create failed for %s: %d\n", cases[i].address, status);
+                return 1;
+              }
+
+              struct in_addr subnet = {0};
+              struct in_addr mask = {0};
+              if (inet_pton(AF_INET, cases[i].address, &subnet) != 1 ||
+                  inet_pton(AF_INET, cases[i].mask, &mask) != 1) {
+                CFRelease(config);
+                return 2;
+              }
+
+              status = vmnet_network_configuration_set_ipv4_subnet(config, &subnet, &mask);
+              CFRelease(config);
+              printf("%s %s -> %d\n", cases[i].address, cases[i].mask, status);
+              if (status != VMNET_SUCCESS) return 3;
+            }
+
+            return 0;
+          }
+          C
+          xcrun clang "$RUNNER_TEMP/probe.c" \
+            -framework CoreFoundation \
+            -framework vmnet \
+            -o "$RUNNER_TEMP/probe"
+          "$RUNNER_TEMP/probe"
