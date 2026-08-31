@@ -1,0 +1,255 @@
+name: Validate final vmnet subnet implementation
+
+on:
+  push:
+    branches:
+      - build/vmnet-subnet-macos-v3
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Build, test, sign, and package
+    runs-on: xcode-27
+    timeout-minutes: 75
+    env:
+      FEATURE_COMMIT: 4f6954dc7f656a5727a358b2e8ae4e0c33701a70
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Show toolchain and verify source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sw_vers
+          swift --version
+          xcodebuild -version
+          git merge-base --is-ancestor "$FEATURE_COMMIT" HEAD
+          git diff --exit-code "$FEATURE_COMMIT" -- . \
+            ':(exclude).github/workflows/validate-vmnet-subnet-v3.yml'
+
+      - name: Validate entitlements, profile, and scripts
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sh -n scripts/run-signed.sh
+          sh -n .ci/sign-release.sh
+
+          plutil -lint Resources/tart-dev.entitlements
+          plutil -lint Resources/tart-vmnet-dev.entitlements
+          plutil -lint Resources/tart-prod.entitlements
+
+          if /usr/libexec/PlistBuddy \
+            -c 'Print :com.apple.vm.networking' \
+            Resources/tart-dev.entitlements >/dev/null 2>&1; then
+            echo 'default development entitlements must not contain restricted vmnet entitlement' >&2
+            exit 1
+          fi
+
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.vm.networking' Resources/tart-vmnet-dev.entitlements)" = true
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.vm.networking' Resources/tart-prod.entitlements)" = true
+
+          grep -q -- '--net-vmnet-subnet' scripts/run-signed.sh
+          grep -q -- 'tart-vmnet-dev.entitlements' scripts/run-signed.sh
+          grep -q -- 'tart-vmnet-dev.entitlements' .ci/sign-release.sh
+
+          security cms -D -i Resources/embedded.provisionprofile \
+            > "$RUNNER_TEMP/embedded-profile.plist"
+          plutil -lint "$RUNNER_TEMP/embedded-profile.plist"
+          plutil -p "$RUNNER_TEMP/embedded-profile.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.vm.networking' "$RUNNER_TEMP/embedded-profile.plist")" = true
+
+      - name: Build and run full unit suite
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export PATH="$PATH:/usr/sbin"
+          swift build --build-system swiftbuild
+          swift test --build-system swiftbuild
+
+          shim_object="$(find .build -path '*TartCoreFoundationShim.build/TartCoreFoundationShim.c.o' -print -quit)"
+          test -n "$shim_object"
+          nm -u "$shim_object" | grep -- '_CFRelease'
+
+      - name: Verify formatting
+        shell: bash
+        run: |
+          set -euxo pipefail
+          swift package plugin \
+            --allow-writing-to-package-directory \
+            swiftformat \
+            --cache ignore \
+            --lint \
+            --report swiftformat.json \
+            .
+
+      - name: Build arm64 and x86_64 release binaries
+        shell: bash
+        env:
+          VERSION: 0.0.0-vmnet-subnet-${{ github.sha }}
+        run: |
+          set -euxo pipefail
+          .ci/set-version.sh
+          sh .ci/build-release.sh arm64
+          sh .ci/build-release.sh x86_64
+
+          arm64_binary=".build/prebuilt/arm64/tart"
+          x86_binary=".build/prebuilt/x86_64/tart"
+
+          file "$arm64_binary"
+          file "$x86_binary"
+          "$arm64_binary" --version
+          "$arm64_binary" run --help | grep -- '--net-vmnet-subnet'
+
+      - name: Exercise exact snapshot signing path
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          app="dist/tart_darwin_all/tart.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp .build/prebuilt/arm64/tart "$app/Contents/MacOS/tart"
+          cp Resources/embedded.provisionprofile "$app/Contents/"
+          cp Resources/Info.plist "$app/Contents/"
+          cp "Resources/actool/UPW Tart.icns" "$app/Contents/Resources/"
+          cp "Resources/actool/Assets.car" "$app/Contents/Resources/"
+
+          TART_RELEASE_SNAPSHOT=true .ci/sign-release.sh
+
+          codesign --verify --strict --deep --verbose=2 "$app"
+          codesign --display --entitlements :- "$app" 2>&1 \
+            | tee dist/signed-entitlements.txt
+          grep -q -- 'com.apple.vm.networking' dist/signed-entitlements.txt
+
+      - name: Package real-machine test build
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          package="dist/tart-vmnet-subnet"
+          mkdir -p "$package"
+          ditto dist/tart_darwin_all/tart.app "$package/tart.app"
+          cp Resources/tart-vmnet-dev.entitlements "$package/"
+          cp "$RUNNER_TEMP/embedded-profile.plist" "$package/"
+
+          cat > "$package/resign-local.sh" <<'EOF'
+          #!/bin/sh
+          set -eu
+          cd "$(dirname "$0")"
+          identity="${1:--}"
+          codesign \
+            --force \
+            --deep \
+            --sign "$identity" \
+            --entitlements tart-vmnet-dev.entitlements \
+            tart.app
+          codesign --verify --strict --deep --verbose=2 tart.app
+          codesign --display --entitlements :- tart.app
+          EOF
+          chmod +x "$package/resign-local.sh"
+
+          cat > "$package/TESTING.md" <<'EOF'
+          # Tart explicit-vmnet-subnet real-machine test
+
+          This Apple Silicon build requires macOS 26 or newer. It is an ad-hoc,
+          non-notarized test build carrying the restricted vmnet entitlement.
+
+          ## Install alongside normal Tart
+
+          Keep the packaged signature for the first attempt:
+
+          ```shell
+          xattr -dr com.apple.quarantine tart.app
+          codesign --verify --strict --deep --verbose=2 tart.app
+          codesign --display --entitlements :- tart.app
+          sudo mkdir -p /Applications/Tart-vmnet-subnet
+          sudo ditto tart.app /Applications/Tart-vmnet-subnet/tart.app
+          sudo ln -sf /Applications/Tart-vmnet-subnet/tart.app/Contents/MacOS/tart /opt/homebrew/bin/tart-vmnet-subnet
+          tart-vmnet-subnet --version
+          ```
+
+          If macOS terminates the executable with `Killed: 9`, collect the code
+          signing/AMFI log before changing the signature:
+
+          ```shell
+          sudo log show --last 5m --style compact \
+            --predicate '(process == "amfid") OR (process == "syspolicyd") OR (eventMessage CONTAINS[c] "tart")'
+          ```
+
+          `resign-local.sh` is included for controlled experiments. Ad-hoc signing
+          is `./resign-local.sh -`; a named identity can be supplied as its first
+          argument. A restricted entitlement can still be rejected when the
+          signing identity and provisioning profile are not authorized for it, so
+          a signing rejection is not evidence that the vmnet implementation failed.
+
+          ## Test the network
+
+          Select an RFC 1918 CIDR that does not overlap LAN, VPN, sing-box,
+          Parallels, or another active vmnet network.
+
+          ```shell
+          VM=YOUR_VM_NAME
+          CIDR=192.168.200.0/24
+
+          tart-vmnet-subnet run --net-vmnet-subnet "$CIDR" "$VM"
+          ```
+
+          In another terminal:
+
+          ```shell
+          VM=YOUR_VM_NAME
+          GUEST_IP="$(tart-vmnet-subnet ip "$VM" --wait 120)"
+          printf 'guest IP: %s\n' "$GUEST_IP"
+          route -n get "$GUEST_IP"
+          ping -c 3 "$GUEST_IP"
+          ```
+
+          If the DHCP lease resolver does not find the address, generate guest
+          traffic and retry with `--resolver arp`, or use `--resolver agent` when
+          tart-guest-agent is installed.
+
+          Verify inside the guest that its address belongs to the requested CIDR,
+          its default gateway and DNS work, and public Internet access succeeds.
+          Then configure sing-box to select `direct` for destination CIDR
+          `192.168.200.0/24` and verify that Parallels traffic remains on its own
+          policy.
+
+          Also test teardown and reservation release:
+
+          1. Stop the VM.
+          2. Start it again with the same CIDR.
+          3. Start a different Tart VM with the same CIDR while the first is
+             running; it should fail clearly instead of silently choosing another
+             subnet.
+          4. Stop the first VM and confirm the second can then acquire that CIDR.
+          EOF
+
+          {
+            printf 'feature commit: %s\n' "$FEATURE_COMMIT"
+            printf 'build commit: %s\n' "$GITHUB_SHA"
+          } > "$package/BUILD_COMMIT.txt"
+
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$package" \
+            dist/tart-vmnet-subnet-arm64.zip
+          shasum -a 256 dist/tart-vmnet-subnet-arm64.zip \
+            > dist/tart-vmnet-subnet-arm64.zip.sha256
+
+      - name: Upload test artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tart-vmnet-subnet-arm64-${{ github.sha }}
+          path: |
+            dist/tart-vmnet-subnet-arm64.zip
+            dist/tart-vmnet-subnet-arm64.zip.sha256
+            dist/signed-entitlements.txt
+            swiftformat.json
+          if-no-files-found: error
+          retention-days: 14
