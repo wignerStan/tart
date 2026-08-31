@@ -74,9 +74,11 @@ jobs:
           swift build --build-system swiftbuild
           swift test --build-system swiftbuild
 
-          shim_object="$(find .build -path '*TartCoreFoundationShim.build/TartCoreFoundationShim.c.o' -print -quit)"
-          test -n "$shim_object"
-          nm -u "$shim_object" | grep -- '_CFRelease'
+          xcrun clang \
+            -c Sources/TartCoreFoundationShim/TartCoreFoundationShim.c \
+            -I Sources/TartCoreFoundationShim/include \
+            -o "$RUNNER_TEMP/TartCoreFoundationShim.o"
+          nm -u "$RUNNER_TEMP/TartCoreFoundationShim.o" | grep -- '_CFRelease'
 
       - name: Verify formatting
         shell: bash
