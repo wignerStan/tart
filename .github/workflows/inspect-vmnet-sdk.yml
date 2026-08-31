@@ -34,6 +34,8 @@ jobs:
 
           grep -n -B 12 -A 20 'vmnet_network_configuration_create' "$VMNET"
           grep -n -B 12 -A 20 'vmnet_network_create' "$VMNET"
+          grep -n -B 20 -A 35 'vmnet_network_configuration_set_ipv4_subnet' "$VMNET"
+          grep -n -B 12 -A 30 'vmnet_network_configuration_set_ipv4_dhcp_reservation' "$VMNET"
           grep -n -B 8 -A 12 'vmnet_network_configuration_ref' "$VMNET" | head -80
           grep -n -B 8 -A 12 'vmnet_network_ref' "$VMNET" | head -120
           cat "$VZ"
