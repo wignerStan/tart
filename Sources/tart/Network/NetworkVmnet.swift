@@ -1,3 +1,4 @@
+import Foundation
 import Darwin
 import Semaphore
 import Virtualization
@@ -130,7 +131,22 @@ import Virtualization
       }
 
       status = .VMNET_FAILURE
-      guard let network = vmnet_network_create(configuration, &status) else {
+      let created: vmnet_network_ref?
+      if let path = ProcessInfo.processInfo.environment["TART_VMNET_NETWORK_FILE"] {
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        guard data.count > 0 && data.count <= 65536 else {
+          throw NetworkVmnetError.networkCreationFailed(subnet: subnet, status: .VMNET_INVALID_ARGUMENT)
+        }
+        var rawStatus: Int32 = 0
+        let pointer = data.withUnsafeBytes { bytes in
+          tart_vmnet_network_import_plist(bytes.baseAddress, bytes.count, &rawStatus)
+        }
+        status = vmnet_return_t(rawValue: UInt32(bitPattern: rawStatus))!
+        created = pointer.map { OpaquePointer($0) }
+      } else {
+        created = vmnet_network_create(configuration, &status)
+      }
+      guard let network = created else {
         throw NetworkVmnetError.networkCreationFailed(subnet: subnet, status: status)
       }
 

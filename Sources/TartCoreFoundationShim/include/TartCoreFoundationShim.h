@@ -5,6 +5,9 @@
 extern "C" {
 #endif
 
+#include <stddef.h>
+void *tart_vmnet_network_import_plist(const void *bytes, size_t length, int *status);
+
 void tart_cf_release(const void *object);
 
 #ifdef __cplusplus

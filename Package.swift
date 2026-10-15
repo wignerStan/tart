@@ -34,7 +34,7 @@ let package = Package(
       name: "TartCoreFoundationShim",
       path: "Sources/TartCoreFoundationShim",
       publicHeadersPath: "include",
-      linkerSettings: [.linkedFramework("CoreFoundation")]
+      linkerSettings: [.linkedFramework("CoreFoundation"), .linkedFramework("vmnet")]
     ),
     .executableTarget(name: "tart", dependencies: [
       "TartCoreFoundationShim",
