@@ -130,7 +130,7 @@ import Virtualization
       let home = String(cString: account.pointee.pw_dir)
       let subnet = try IPv4Subnet(values[0])
       let network = try NetworkVmnet(subnet: subnet)
-      guard initgroups(user, Int32(bitPattern: gid)) == 0, setgid(gid) == 0, setuid(uid) == 0,
+      guard initgroups(user, gid) == 0, setgid(gid) == 0, setuid(uid) == 0,
             getuid() == uid, geteuid() == uid else {
         throw ValidationError("Could not permanently drop vmnet setup privileges")
       }
