@@ -438,7 +438,9 @@ class VM: NSObject, VZVirtualMachineDelegate, ObservableObject {
     // A dummy console device useful for implementing
     // host feature checks in the guest agent software.
     let consolePort = VZVirtioConsolePortConfiguration()
-    consolePort.name = "tart-version-\(CI.version)"
+    // Keep the guest device name short; prerelease/build metadata is only
+    // needed in the CLI version, not in guest feature detection.
+    consolePort.name = "tart-version-\(CI.version.split(whereSeparator: { $0 == "-" || $0 == "+" }).first!)"
 
     let consoleDevice = VZVirtioConsoleDeviceConfiguration()
     consoleDevice.ports[0] = consolePort
