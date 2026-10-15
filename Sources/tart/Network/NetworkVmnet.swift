@@ -57,6 +57,10 @@ import Virtualization
       Self.addressString(networkAddress)
     }
 
+    var gatewayAddressDescription: String {
+      Self.addressString(networkAddress + 1)
+    }
+
     var subnetMask: UInt32 {
       UInt32.max << (32 - Int(prefixLength))
     }
@@ -117,9 +121,11 @@ import Virtualization
         throw NetworkVmnetError.configurationCreationFailed(status: status)
       }
 
+      // Tahoe's DHCP service treats this value as its gateway. Passing the
+      // canonical .0 address creates an idle object but fails at VM attachment.
       var subnetAddress = in_addr()
       var subnetMask = in_addr()
-      guard inet_pton(AF_INET, subnet.subnetAddressDescription, &subnetAddress) == 1,
+      guard inet_pton(AF_INET, subnet.gatewayAddressDescription, &subnetAddress) == 1,
             inet_pton(AF_INET, subnet.subnetMaskDescription, &subnetMask) == 1
       else {
         throw NetworkVmnetError.invalidGeneratedAddress(subnet: subnet)
@@ -133,7 +139,9 @@ import Virtualization
       status = .VMNET_FAILURE
       let created: vmnet_network_ref?
       if let path = ProcessInfo.processInfo.environment["TART_VMNET_NETWORK_FILE"] {
-        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: 65537) ?? Data()
         guard data.count > 0 && data.count <= 65536 else {
           throw NetworkVmnetError.networkCreationFailed(subnet: subnet, status: .VMNET_INVALID_ARGUMENT)
         }

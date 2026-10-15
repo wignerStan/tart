@@ -17,7 +17,7 @@ int main(int argc,char **argv) {
  uint32_t addr=ntohl(a.s_addr), mask=UINT32_MAX<<(32-prefix), end=addr|~mask;
  if((addr&mask)!=addr || !((addr>=0x0a000000 && end<=0x0affffff)||(addr>=0xac100000 && end<=0xac1fffff)||(addr>=0xc0a80000 && end<=0xc0a8ffff)))return 2;
  char *tail;unsigned long owner=strtoul(argv[3],&tail,10);if(*tail || owner==0 || owner>UINT32_MAX)return 2;
- m.s_addr=htonl(mask);vmnet_return_t status;
+ m.s_addr=htonl(mask);a.s_addr=htonl(addr+1);vmnet_return_t status;
  vmnet_network_configuration_ref config=vmnet_network_configuration_create(VMNET_SHARED_MODE,&status);
  if(!config)return 3;
  status=vmnet_network_configuration_set_ipv4_subnet(config,&a,&m);
@@ -45,6 +45,11 @@ int main(int argc,char **argv) {
  const unsigned char *bytes=CFDataGetBytePtr(payload);size_t left=CFDataGetLength(payload);
  while(left){ssize_t n=write(fd,bytes,left);if(n<0&&errno==EINTR)continue;if(n<=0){close(fd);unlink(argv[2]);return 4;}bytes+=n;left-=n;}
  if(fchown(fd,(uid_t)owner,(gid_t)-1)!=0){close(fd);unlink(argv[2]);return 4;}
- close(fd);CFRelease(payload);CFRelease(network);
+ close(fd);CFRelease(payload);
+ printf("Prepared %s for uid %lu\n",argv[1],owner);fflush(stdout);
+ // The creator must remain alive until VZ has attached; retain ownership for
+ // the session. The caller removes this private token on exit. Bound lifetime.
+ for(unsigned elapsed=0;elapsed<28800 && access(argv[2],F_OK)==0;elapsed++)sleep(1);
+ CFRelease(network);
  printf("Prepared %s for uid %lu\n",argv[1],owner);return 0;
 }
