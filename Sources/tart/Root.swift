@@ -40,6 +40,12 @@ struct Root: AsyncParsableCommand {
   // never boots. Keeping main() synchronous lets a command that needs the main
   // run loop own it at the top level, exactly like a plain SwiftUI app.
   public static func main() {
+    #if compiler(>=6.4)
+      if #available(macOS 26, *) {
+        do { try NetworkVmnet.prepareRootNetworkIfRequested() }
+        catch { exit(withError: error) }
+      }
+    #endif
     // Add commands that are only available on specific macOS versions
     if #available(macOS 14, *) {
       configuration.subcommands.append(Suspend.self)
