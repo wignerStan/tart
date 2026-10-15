@@ -753,12 +753,6 @@ struct Run: AsyncParsableCommand {
           throw ValidationError("--net-vmnet-subnet requires the host to be running macOS 26 (or newer)")
         }
 
-        if let prepared = NetworkVmnet.preparedRootNetwork {
-          guard NetworkVmnet.preparedRootSubnet == netVmnetSubnet else {
-            throw ValidationError("Prepared vmnet subnet does not match run arguments")
-          }
-          return prepared
-        }
         return try NetworkVmnet(subnet: IPv4Subnet(netVmnetSubnet))
       }
     #endif

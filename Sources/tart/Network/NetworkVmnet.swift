@@ -1,5 +1,3 @@
-import ArgumentParser
-import Foundation
 import Darwin
 import Semaphore
 import Virtualization
@@ -105,41 +103,6 @@ import Virtualization
 
   @available(macOS 26, *)
   final class NetworkVmnet: Network {
-    // Explicit local-development path: create vmnet as root, then permanently
-    // drop privileges before argument validation or any VM storage access.
-    static var preparedRootNetwork: NetworkVmnet?
-    static var preparedRootSubnet: String?
-
-    static func prepareRootNetworkIfRequested() throws {
-      guard let user = ProcessInfo.processInfo.environment["TART_VMNET_RUN_AS_USER"] else { return }
-      guard geteuid() == 0, let account = getpwnam(user), account.pointee.pw_uid != 0 else {
-        throw ValidationError("TART_VMNET_RUN_AS_USER requires root and a non-root account")
-      }
-      let arguments = CommandLine.arguments
-      guard arguments.count > 1, arguments[1] == "run" else {
-        throw ValidationError("TART_VMNET_RUN_AS_USER only supports tart run")
-      }
-      let values = arguments.enumerated().compactMap { index, argument -> String? in
-        if argument.hasPrefix("--net-vmnet-subnet=") { return String(argument.dropFirst("--net-vmnet-subnet=".count)) }
-        if argument == "--net-vmnet-subnet", index + 1 < arguments.count { return arguments[index + 1] }
-        return nil
-      }
-      guard values.count == 1 else { throw ValidationError("Exactly one --net-vmnet-subnet is required") }
-      let uid = account.pointee.pw_uid
-      let gid = account.pointee.pw_gid
-      let home = String(cString: account.pointee.pw_dir)
-      let subnet = try IPv4Subnet(values[0])
-      let network = try NetworkVmnet(subnet: subnet)
-      guard initgroups(user, gid) == 0, setgid(gid) == 0, setuid(uid) == 0,
-            getuid() == uid, geteuid() == uid else {
-        throw ValidationError("Could not permanently drop vmnet setup privileges")
-      }
-      setenv("HOME", home, 1)
-      unsetenv("TART_VMNET_RUN_AS_USER")
-      preparedRootSubnet = subnet.description
-      preparedRootNetwork = network
-    }
-
     private let network: vmnet_network_ref
 
     init(subnet: IPv4Subnet) throws {
